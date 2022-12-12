@@ -25,6 +25,44 @@ def connect():
     )
 
 
+def get_playlist_items(sp, playlist_id, tracks=False):
+    """Get playlist items"""
+    offset = 0
+    items = []
+    while True:
+        response = sp.playlist_items(playlist_id, offset=offset)
+        if tracks:
+            items.extend(e['track'] for e in response['items'])
+        else:
+            items.extend(response['items'])
+        if len(response['items']) == 0:
+            break
+        offset = offset + len(response['items'])
+    return items
+
+
+def check_for_listened(sp: spotipy.Spotify):
+    """Check for listened songs"""
+    main_items = get_playlist_items(sp, os.getenv('RINJI_MAIN_PLAYLIST_ID'), tracks=True)
+    temp_items = get_playlist_items(sp, os.getenv('RINJI_TEMP_PLAYLIST_ID'), tracks=True)
+
+    listened_artists = {(tt['artists'][0]['id'], tt['artists'][0]['name']) for tt in temp_items if tt in main_items}
+
+    if listened_artists:
+        selected = checkbox(
+            'It seems that some artists in your temporary playlists are already added. Which do you want to remove?',
+            choices=[
+                Choice(e[1], e[0])
+                for e in
+                listened_artists
+            ]
+        ).ask()
+        if selected:
+            sp.playlist_remove_all_occurrences_of_items(
+                playlist_id=os.getenv('RINJI_TEMP_PLAYLIST_ID'),
+                items=[tt['id'] for tt in temp_items if tt['artists'][0]['id'] in selected]
+            )
+
 def get_artist_id(sp):
     """Get artist id"""
     artist_name = text('Artist name: ').ask()
@@ -133,8 +171,9 @@ def pretty_print(songs):
 
 def add_to_playlist(spotify, songs):
     """Add songs to playlist"""
+    print(f'Adding {len(songs)} songs...')
     spotify.playlist_add_items(
-        playlist_id=os.getenv('RINJI_PLAYLIST_ID'),
+        playlist_id=os.getenv('RINJI_TEMP_PLAYLIST_ID'),
         items=[song['id'] for song in songs]
     )
 
@@ -142,6 +181,7 @@ def add_to_playlist(spotify, songs):
 def main():
     """Main function"""
     spotify = connect()
+    check_for_listened(spotify)
     artist_id = get_artist_id(spotify)
     albums = get_songs(spotify, artist_id)
     songs = reduce(albums)
@@ -151,3 +191,4 @@ def main():
 if __name__ == '__main__':
     load_dotenv()
     main()
+    print('Done!')
