@@ -172,10 +172,12 @@ def pretty_print(songs):
 def add_to_playlist(spotify, songs):
     """Add songs to playlist"""
     print(f'Adding {len(songs)} songs...')
-    spotify.playlist_add_items(
-        playlist_id=os.getenv('RINJI_TEMP_PLAYLIST_ID'),
-        items=[song['id'] for song in songs]
-    )
+    songs_split = [songs[i:i + 100] for i in range(0, len(songs), 100)]
+    for songs in songs_split:
+        spotify.playlist_add_items(
+            playlist_id=os.getenv('RINJI_TEMP_PLAYLIST_ID'),
+            items=[song['id'] for song in songs]
+        )
 
 
 def main():
