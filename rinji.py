@@ -1,111 +1,76 @@
 """
 rinji.py
 
-Package 
+Package
 
-Created by kinami on 2022-11-21
+Created by kinami on 2024-09-20
 """
-import os
 from datetime import datetime
 
 import spotipy
+import typer
 from dotenv import load_dotenv
-from questionary import select, text, Choice, checkbox
+from questionary import select, Choice, checkbox, confirm
+from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
 
 
-def connect():
+def connect(spotify_client_id: str, spotify_client_secret: str, spotify_redirect_uri: str, spotify_scope: str):
     return spotipy.Spotify(
         auth_manager=SpotifyOAuth(
-            client_id=os.getenv('RINJI_CLIENT_ID'),
-            client_secret=os.getenv('RINJI_CLIENT_SECRET'),
-            redirect_uri=os.getenv('RINJI_REDIRECT_URI'),
-            scope=os.getenv('RINJI_SCOPE')
+            client_id=spotify_client_id,
+            client_secret=spotify_client_secret,
+            redirect_uri=spotify_redirect_uri,
+            scope=spotify_scope
         )
     )
 
 
-def get_playlist_items(sp, playlist_id, tracks=False):
-    """Get playlist items"""
-    offset = 0
-    items = []
-    while True:
-        response = sp.playlist_items(playlist_id, offset=offset)
-        if tracks:
-            items.extend(e['track'] for e in response['items'])
-        else:
-            items.extend(response['items'])
-        if len(response['items']) == 0:
-            break
-        offset = offset + len(response['items'])
-    return items
-
-
-def check_for_listened(sp: spotipy.Spotify):
-    """Check for listened songs"""
-    main_items = get_playlist_items(sp, os.getenv('RINJI_MAIN_PLAYLIST_ID'), tracks=True)
-    temp_items = get_playlist_items(sp, os.getenv('RINJI_TEMP_PLAYLIST_ID'), tracks=True)
-
-    listened_artists = {(tt['artists'][0]['id'], tt['artists'][0]['name']) for tt in temp_items if tt in main_items}
-
-    if listened_artists:
-        selected = checkbox(
-            'It seems that some artists in your temporary playlists are already added. Which do you want to remove?',
-            choices=[
-                Choice(e[1], e[0])
-                for e in
-                listened_artists
-            ]
-        ).ask()
-        if selected:
-            sp.playlist_remove_all_occurrences_of_items(
-                playlist_id=os.getenv('RINJI_TEMP_PLAYLIST_ID'),
-                items=[tt['id'] for tt in temp_items if tt['artists'][0]['id'] in selected]
-            )
-
-def get_artist_id(sp):
-    """Get artist id"""
-    artist_name = text('Artist name: ').ask()
-    results = sp.search(q=f'artist:{artist_name}', type='artist')['artists']['items']
-    if len(results) == 0:
-        print("Can't find that artist")
-        exit()
-    elif len(results) == 1:
-        return results[0]['id']
+def get_artist_id(sp: Spotify, artist: str):
+    """https://open.spotify.com/artist/38WbKH6oKAZskBhqDFA8Uj"""
+    if artist.startswith('https://open.spotify.com/artist/'):
+        artist_id = artist.split('/')[-1].split('?')[0]
     else:
-        return select(
-            "Which artist?",
-            choices=[
-                Choice(title=f'{item["name"]} ({item["external_urls"]["spotify"]})', value=item['id'])
-                for item in results
-            ]
-        ).ask()
+        results = sp.search(q=f'artist:{artist}', type='artist')['artists']['items']
+        if len(results) == 0:
+            print("Can't find that artist")
+            exit()
+        elif len(results) == 1:
+            if confirm(f"Is '{results[0]['name']}' ({results[0]["external_urls"]["spotify"]}) the artist you are looking for? ").ask():
+                return results[0]['id']
+            else:
+                print('Then be more specific')
+        else:
+            return select(
+                "Which artist?",
+                choices=[
+                    Choice(title=f'{item["name"]} ({item["external_urls"]["spotify"]})', value=item['id'])
+                    for item in results
+                ]
+            ).ask()
+    return artist_id
 
 
-def get_songs(sp, artist_id):
+def get_albums(sp, artist_id):
     """Get songs"""
     albums = sp.artist_albums(artist_id, limit=50, country='ES')['items']
+
     impure = [
-        any([artist['id'] != artist_id for artist in album['artists']]) or
-        album['album_group'] == 'compilation'
+        any(artist['id'] != artist_id for artist in album['artists']) or album['album_group'] == 'compilation'
         for album in albums
     ]
-    sel_impure = []
-    if impure:
-        sel_impure = checkbox(
-            "These albums do not seem to be pure, please select the ones you want to include",
-            choices=[
-                Choice(title=f'{album["name"]} ({album["external_urls"]["spotify"]})', value=i)
-                for i, album in enumerate(albums) if impure[i]
-            ]
-        ).ask()
-    albums = [
-        album
-        for i, album in enumerate(albums) if not impure[i] or i in sel_impure
-    ]
-    albums_clean = {}
-    for album in albums:
-        albums_clean[album['id']] = {
+
+    sel_impure = checkbox(
+        "These albums do not seem to be pure, please select the ones you want to include",
+        choices=[
+            Choice(title=f'{album["name"]} ({album["external_urls"]["spotify"]})', value=i)
+            for i, album in enumerate(albums) if impure[i]
+        ]
+    ).ask() if impure else []
+
+    print('Getting albums...')
+    albums_clean = sorted([
+        {
             'name': album['name'],
             'date': datetime.strptime(album['release_date'], '%Y-%m-%d').date(),
             'tracks': [
@@ -120,77 +85,90 @@ def get_songs(sp, artist_id):
             ],
             'type': 'EP' if album['album_type'] == 'single' and album['total_tracks'] >= 6 else album['album_type'],
         }
-
-    albums_clean = sorted(albums_clean.values(), key=lambda x: x['date'])
+        for i, album in enumerate(albums) if not impure[i] or i in sel_impure
+    ], key=lambda x: x['date'])
 
     return albums_clean
 
 
-def reduce(albums):
-    """Reduce songs"""
-    reduced = []
-    nameset = set([s['name'] for s in [song for album in albums for song in album['tracks']]])
+def compile_songlist(sp, albums):
+    """Compile songlist"""
+    print('Compiling songlist...')
+    songlist = []
+    nameset = {song['name'] for album in albums for song in album['tracks']}
 
     for album in albums:
         if album['type'] == 'album':
-            reduced.extend(album['tracks'])
+            songlist.extend(album['tracks'])
             albums.remove(album)
 
     for album in sorted(albums, key=lambda x: 1 if x['type'] == 'EP' else 2):
-        if album['tracks'][0]['name'] in [song['name'] for song in reduced]:
-            pos = [song['name'] for song in reduced].index(album['tracks'][0]['name'])
-            reduced.pop(pos)
+        track_names = [song['name'] for song in songlist]
+        if album['tracks'][0]['name'] in track_names:
+            pos = track_names.index(album['tracks'][0]['name'])
+            songlist.pop(pos)
             for song in album['tracks']:
-                reduced.insert(pos, song)
+                songlist.insert(pos, song)
                 pos += 1
         else:
-            pos = [i for i, song in enumerate(reduced) if song['date'] > album['date']]
-            if pos:
-                pos = pos[0]
+            pos = next((i for i, song in enumerate(songlist) if song['date'] > album['date']), None)
+            if pos is not None:
                 for song in album['tracks']:
-                    reduced.insert(pos, song)
+                    songlist.insert(pos, song)
                     pos += 1
             else:
-                reduced.extend(album['tracks'])
+                songlist.extend(album['tracks'])
 
-    for song in reduced:
-        for s in reduced:
+    for song in songlist:
+        for s in songlist:
             if song['name'] == s['name'] and song != s:
-                reduced.remove(s)
+                songlist.remove(s)
 
-    assert len(reduced) == len(nameset), 'Songs were lost in the process!'
+    assert len(songlist) == len(nameset), 'Songs were lost in the process!'
 
-    return reduced
-
-
-def pretty_print(songs):
-    """Pretty print"""
-    for song in songs:
-        print(f'{song["name"]} - {song["album"]}')
+    return songlist
 
 
-def add_to_playlist(spotify, songs):
+def add_to_playlist(spotify, songs, playlist_id):
     """Add songs to playlist"""
-    print(f'Adding {len(songs)} songs...')
+    print(f'Adding {len(songs)} songs to the playlist...')
     songs_split = [songs[i:i + 100] for i in range(0, len(songs), 100)]
     for songs in songs_split:
         spotify.playlist_add_items(
-            playlist_id=os.getenv('RINJI_TEMP_PLAYLIST_ID'),
+            playlist_id=playlist_id,
             items=[song['id'] for song in songs]
         )
 
 
-def main():
-    """Main function"""
-    spotify = connect()
-    check_for_listened(spotify)
-    artist_id = get_artist_id(spotify)
-    albums = get_songs(spotify, artist_id)
-    songs = reduce(albums)
-    add_to_playlist(spotify, songs)
+def main(
+        artist: str = typer.Argument(..., help='Artist name or link'),
+        spotify_client_id: str = typer.Option(..., prompt=True, help='Spotify client ID', envvar='RINJI_CLIENT_ID'),
+        spotify_client_secret: str = typer.Option(..., prompt=True, help='Spotify client secret',
+                                                  envvar='RINJI_CLIENT_SECRET'),
+        spotify_redirect_uri: str = typer.Option(..., prompt=True, help='Spotify redirect URI',
+                                                 envvar='RINJI_REDIRECT_URI'),
+        spotify_scope: str = typer.Option(..., prompt=True, help='Spotify scope', envvar='RINJI_SCOPE'),
+        main_playlist_id: str = typer.Option(..., prompt=True, help='Main playlist ID',
+                                             envvar='RINJI_MAIN_PLAYLIST_ID'),
+        tmp_playlist_id: str = typer.Option(..., prompt=True, help='Temporary playlist ID',
+                                            envvar='RINJI_TEMP_PLAYLIST_ID'),
+        reverse: bool = typer.Option(False, "-r", help='Reverse the order of the songs'),
+        dry_run: bool = typer.Option(False, "-d", help='Dry run')
+):
+    sp = connect(spotify_client_id, spotify_client_secret, spotify_redirect_uri, spotify_scope)
+    artist_id = get_artist_id(sp, artist)
+    albums = get_albums(sp, artist_id)
+    songs = compile_songlist(sp, albums)
+    if reverse:
+        songs = songs[::-1]
+    if dry_run:
+        print('Songs would have been added in this order:')
+        for i, song in enumerate(songs, 1):
+            print(f'{i}. {song["name"]} - {song["album"]}')
+    else:
+        add_to_playlist(sp, songs, tmp_playlist_id)
 
 
 if __name__ == '__main__':
     load_dotenv()
-    main()
-    print('Done!')
+    typer.run(main)

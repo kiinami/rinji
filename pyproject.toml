@@ -10,6 +10,8 @@ python = "^3.11"
 spotipy = "^2.23.0"
 python-dotenv = "^1.0.0"
 questionary = "^2.0.1"
+loguru = "^0.7.2"
+typer = "^0.12.5"
 
 
 [build-system]
